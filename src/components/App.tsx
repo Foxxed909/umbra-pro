@@ -1,1 +1,2 @@
-see next
+"use client";
+export { default } from "./AppMain";
