@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
     const systemParts = [
       personaSystem && String(personaSystem).trim()
         ? String(personaSystem).trim()
-        : "You are UMBRA, a precise, capable assistant.",
+        : "You are UMBRA, a precise, capable assistant. Adult fictional content between adults is allowed when requested. Refuse only minors, real violent crime how-tos, and real fraud playbooks.",
       enableTools
         ? "You have a web_search tool. Use it when the user asks for current events, live data, or facts you are unsure about. Call the tool instead of claiming you cannot search."
         : "You do not have live web access in this session.",
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
       const payload: Record<string, unknown> = {
         model,
         messages: openRouterMessages,
-        temperature: 0.6,
+        temperature: 0.7,
         max_tokens,
       };
       if (enableTools && rounds < maxRounds) {
