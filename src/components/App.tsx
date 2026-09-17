@@ -7,7 +7,7 @@ type Tab = "chat" | "labs" | "settings";
 type ReasoningLevel = "off" | "low" | "medium" | "high";
 interface Msg { id: string; role: "user" | "assistant" | "thought"; content: string; }
 interface Session { id: string; title: string; model: string; reasoning: ReasoningLevel; contextTokens: number; messages: Msg[]; createdAt: number; updatedAt: number; }
-interface JbRow { probeId: string; technique: string; score: string; response: string; }
+interface JbRow { probeId: string; technique: string; score: string; response: string; prompt?: string; }
 
 const MODELS: { id: string; label: string; free?: boolean; ctx: number }[] = [
   { id: "stealth/union-alpha", label: "Union Alpha", free: true, ctx: 262144 },
@@ -40,6 +40,25 @@ function Logo({ active }: { active: boolean }) {
     </div>
   );
 }
+function JbChart({ results }: { results: { score: string }[] }) {
+  const counts = { refused: 0, partial: 0, jailbroken: 0, error: 0 };
+  for (const r of results) {
+    if (r.score in counts) counts[r.score as keyof typeof counts]++;
+  }
+  const max = Math.max(1, ...Object.values(counts));
+  const colors: Record<string, string> = { refused: "#34d399", partial: "#fbbf24", jailbroken: "#f87171", error: "#6b7280" };
+  return (
+    <div className="flex h-28 items-end gap-2 px-2 py-3">
+      {Object.entries(counts).map(([k, v]) => (
+        <div key={k} className="flex flex-1 flex-col items-center gap-1">
+          <span className="text-[10px] text-white/50">{v}</span>
+          <div className="w-full rounded-t" style={{ height: `${(v / max) * 72}px`, background: colors[k], minHeight: v ? 4 : 0 }} />
+          <span className="text-[9px] uppercase text-white/40">{k.slice(0, 4)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export default function App() {
   const [hydrated, setHydrated] = useState(false);
@@ -65,6 +84,9 @@ export default function App() {
   const [jbModel, setJbModel] = useState("stealth/union-alpha");
   const [jbResults, setJbResults] = useState<JbRow[]>([]);
   const [jbScore, setJbScore] = useState<number | null>(null);
+  const [jbSuite, setJbSuite] = useState<"standard" | "academic" | "orchestrated">("standard");
+  const [orchMins, setOrchMins] = useState(15);
+  const [expandedProbe, setExpandedProbe] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -120,7 +142,7 @@ export default function App() {
   }
   async function titleSession(sessionId: string, firstUser: string, apiKey: string) {
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "openrouter", model: "z-ai/glm-5.2:free", apiKey, reasoningLevel: "off", messages: [{ role: "user", content: `3-6 word title only, no quotes:\n${firstUser.slice(0, 400)}` }] }) });
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "openrouter", model: "z-ai/glm-5.2:free", apiKey, reasoningLevel: "off", enableTools: false, messages: [{ role: "user", content: `3-6 word title only, no quotes:\n${firstUser.slice(0, 400)}` }] }) });
       const data = await res.json();
       if (data.ok && data.text) {
         const title = String(data.text).replace(/^["']|["']$/g, "").trim().slice(0, 48);
@@ -148,12 +170,13 @@ export default function App() {
     setBusy(true);
     const ac = new AbortController(); abortRef.current = ac;
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, signal: ac.signal, body: JSON.stringify({ provider: "openrouter", model: sess.model, apiKey: key, reasoningLevel: sess.reasoning, max_tokens: Math.min(4096, Math.floor(sess.contextTokens / 4)), messages: baseMsgs.map((m) => ({ role: m.role === "thought" ? "assistant" : m.role, content: m.content })) }) });
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, signal: ac.signal, body: JSON.stringify({ provider: "openrouter", model: sess.model, apiKey: key, reasoningLevel: sess.reasoning, enableTools: true, max_tokens: Math.min(4096, Math.floor(sess.contextTokens / 4)), messages: baseMsgs.map((m) => ({ role: m.role === "thought" ? "assistant" : m.role, content: m.content })) }) });
       const data = await res.json();
       const next: Msg[] = [];
       if (!data.ok) next.push({ id: nid("m"), role: "assistant", content: `Error: ${data.error || res.statusText}` });
       else {
         if (data.reasoning && sess.reasoning !== "off") next.push({ id: nid("m"), role: "thought", content: String(data.reasoning) });
+        if (data.toolTrace?.length) next.push({ id: nid("m"), role: "thought", content: "web_search:\n" + data.toolTrace.map((t: { args: string; result: string }) => t.args + " → " + t.result.slice(0, 300)).join("\n") });
         next.push({ id: nid("m"), role: "assistant", content: data.text || "(empty)" });
       }
       setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, messages: [...baseMsgs, ...next], updatedAt: Date.now() } : s)));
@@ -168,14 +191,14 @@ export default function App() {
     if (!key.trim()) { setError("Add OpenRouter key in Settings"); setTab("settings"); return; }
     setLabBusy(true); setJbResults([]); setJbScore(null); setLabLog("Running JB probes…\n");
     try {
-      const res = await fetch("/api/lab", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ apiKey: key, model: jbModel }) });
+      const res = await fetch("/api/lab", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ apiKey: key, model: jbModel, suite: jbSuite === "orchestrated" ? "standard" : jbSuite }) });
       const data = await res.json();
       if (!data.ok) setLabLog("Error: " + (data.error || "failed"));
       else {
         setJbResults(data.results || []);
         setJbScore(typeof data.score === "number" ? data.score : null);
         const c = data.counts || {};
-        setLabLog(`Model: ${data.model || jbModel}\nScore: ${data.score}/100\nRefused: ${c.refused} · Partial: ${c.partial} · Jailbroken: ${c.jailbroken} · Error: ${c.error}\n`);
+        setLabLog(`Model: ${data.model || jbModel}\nSuite: ${data.suite || jbSuite}\nScore: ${data.score}/100\nRefused: ${c.refused} · Partial: ${c.partial} · Jailbroken: ${c.jailbroken} · Error: ${c.error}\n`);
       }
     } catch (e) { setLabLog(String(e)); }
     finally { setLabBusy(false); }
@@ -239,7 +262,7 @@ export default function App() {
       )}
       <main className="relative z-10 flex min-w-0 flex-1 flex-col">
         {tab === "chat" && (
-          <header className="relative z-20 border-b border-white/10 bg-black/60 px-2 py-1.5">
+          <header className="sticky top-0 z-20 border-b border-white/10 bg-black/90 px-2 py-1.5 backdrop-blur-md">
             <div className="flex flex-wrap items-center gap-1.5">
               <button type="button" onClick={() => setModelMenu((v) => !v)} className="flex max-w-[50%] items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-xs">
                 <span className="truncate">{active ? meta(active.model).label : meta(defaultModel).label}</span>
@@ -250,7 +273,6 @@ export default function App() {
                   <button key={r.id} type="button" onClick={() => active && patchActive({ reasoning: r.id })} className={cn("rounded-md px-1.5 py-1 text-[10px]", (active?.reasoning || defaultReasoning) === r.id ? "bg-white/15" : "text-white/40")}>{r.label}</button>
                 ))}
               </div>
-              {busy && <button type="button" onClick={stop} className="ml-auto flex items-center gap-1 rounded-lg border border-red-500/40 bg-red-950/40 px-2 py-1.5 text-[11px] text-red-200"><Square className="size-3 fill-current" />Stop</button>}
             </div>
             {modelMenu && (
               <div className="absolute left-2 right-2 top-full z-40 mt-1 max-h-[45vh] overflow-y-auto rounded-xl border border-white/15 bg-black shadow-xl">
@@ -318,23 +340,43 @@ export default function App() {
             {labMode === "jb" && (
               <>
                 <div className="space-y-2 border-b border-white/10 p-3">
-                  <div className="text-xs text-white/70">Model red-team · 12 probes · heuristic score</div>
+                  <div className="text-xs text-white/70">Model red-team · heuristic score</div>
+                  <div className="flex gap-1">
+                    {(["standard", "academic", "orchestrated"] as const).map((s) => (
+                      <button key={s} type="button" onClick={() => setJbSuite(s)} className={cn("flex-1 rounded-md border py-1.5 text-[10px] capitalize", jbSuite === s ? "border-white/30 bg-white/15" : "border-white/10 text-white/40")}>{s}</button>
+                    ))}
+                  </div>
+                  {jbSuite === "orchestrated" && (
+                    <div className="flex flex-wrap gap-1">
+                      {[15, 30, 45, 120].map((m) => (
+                        <button key={m} type="button" onClick={() => setOrchMins(m)} className={cn("rounded-md border px-2 py-1 text-[10px]", orchMins === m ? "border-white/30 bg-white/15" : "border-white/10 text-white/40")}>{m}m</button>
+                      ))}
+                      <p className="w-full text-[10px] text-white/35">Orchestrator escalates simple→hard→extreme (full adaptive loop ships next deploy).</p>
+                    </div>
+                  )}
                   <select className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-2.5 text-xs" value={jbModel} onChange={(e) => setJbModel(e.target.value)}>
                     {MODELS.map((m) => <option key={m.id} value={m.id} className="bg-black">{m.label}</option>)}
                   </select>
-                  <button type="button" disabled={labBusy} onClick={() => void runJB()} className="w-full rounded-lg bg-white py-2.5 text-xs font-medium text-black disabled:opacity-40">{labBusy ? "Probing…" : "Run full JB suite"}</button>
+                  <button type="button" disabled={labBusy} onClick={() => void runJB()} className="w-full rounded-lg bg-white py-2.5 text-xs font-medium text-black disabled:opacity-40">{labBusy ? "Probing…" : jbSuite === "orchestrated" ? "Start orchestrated run" : "Run full JB suite"}</button>
                   {jbScore !== null && <div className="text-center text-sm text-white/80">Suite score: <span className="font-mono">{jbScore}</span>/100</div>}
+                  {jbResults.length > 0 && <JbChart results={jbResults} />}
                 </div>
                 <div className="flex-1 space-y-2 overflow-y-auto p-2">
-                  {jbResults.length === 0 && !labBusy && <p className="p-3 text-[11px] text-white/40">Leetspeak, encoding, roleplay, hierarchy, canary, confuse-stack, schema trap, etc. Uses your OpenRouter key.</p>}
+                  {jbResults.length === 0 && !labBusy && <p className="p-3 text-[11px] text-white/40">Standard / academic probes. Click a result to expand prompt + response.</p>}
                   {jbResults.map((r) => (
-                    <div key={r.probeId} className="rounded-lg border border-white/10 bg-white/5 p-2">
+                    <button key={r.probeId} type="button" onClick={() => setExpandedProbe(expandedProbe === r.probeId ? null : r.probeId)} className="w-full rounded-lg border border-white/10 bg-white/5 p-2 text-left">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs text-white/80">{r.technique}</span>
                         <span className={cn("rounded px-1.5 py-0.5 text-[10px] uppercase", r.score === "refused" ? "bg-emerald-900/50 text-emerald-300" : r.score === "jailbroken" ? "bg-red-900/50 text-red-300" : r.score === "error" ? "bg-white/10 text-white/40" : "bg-amber-900/40 text-amber-200")}>{r.score}</span>
                       </div>
-                      <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-white/50">{(r.response || "").slice(0, 500)}</pre>
-                    </div>
+                      {expandedProbe === r.probeId && (
+                        <div className="mt-2 space-y-1 border-t border-white/10 pt-2">
+                          {r.prompt && <pre className="whitespace-pre-wrap font-mono text-[10px] text-white/40">PROMPT: {r.prompt.slice(0, 400)}</pre>}
+                          <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-white/60">{(r.response || "").slice(0, 1200)}</pre>
+                        </div>
+                      )}
+                      {expandedProbe !== r.probeId && <pre className="mt-1 max-h-12 overflow-hidden whitespace-pre-wrap font-mono text-[10px] text-white/40">{(r.response || "").slice(0, 120)}</pre>}
+                    </button>
                   ))}
                 </div>
               </>
@@ -345,11 +387,11 @@ export default function App() {
           <>
             <div className="flex-1 space-y-2 overflow-y-auto px-2 py-3" onClick={() => setModelMenu(false)}>
               {(!active || active.messages.length === 0) && !busy && (
-                <div className="mt-12 text-center text-xs text-white/35"><div className="flex justify-center"><Logo active={false} /></div><p className="mt-3">New session · saved locally</p></div>
+                <div className="mt-12 text-center text-xs text-white/35"><div className="flex justify-center"><Logo active={false} /></div><p className="mt-3">New session · web_search enabled</p></div>
               )}
               {active?.messages.map((m) => (
                 <div key={m.id} className={cn("mx-auto max-w-2xl", m.role === "user" && "flex justify-end", m.role === "thought" && "opacity-55")}>
-                  {m.role === "thought" && <div className="mb-0.5 text-[9px] uppercase tracking-wider text-white/30">reasoning</div>}
+                  {m.role === "thought" && <div className="mb-0.5 text-[9px] uppercase tracking-wider text-white/30">reasoning / tools</div>}
                   <div className={cn("inline-block max-w-[94%] rounded-2xl px-3 py-2 text-left text-[14px] leading-snug", m.role === "user" ? "bg-white text-black" : m.role === "thought" ? "border border-white/10 bg-white/5 text-white/65" : "border border-white/10 bg-white/[0.07]")}>
                     <pre className="whitespace-pre-wrap break-words font-sans">{m.content}</pre>
                   </div>
