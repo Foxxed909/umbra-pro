@@ -161,6 +161,8 @@ export default function App() {
           apiKey: key,
           reasoningLevel: sess.reasoning,
           enableTools: true,
+          githubToken: (typeof localStorage !== "undefined" && localStorage.getItem("umbra.pro.gh")) || "",
+          vercelToken: (typeof localStorage !== "undefined" && localStorage.getItem("umbra.pro.vercel")) || "",
           personaSystem: personaById(sess.persona || defaultPersona).system || undefined,
           max_tokens: Math.min(4096, Math.floor(sess.contextTokens / 4)),
           messages: baseMsgs.map((m) => ({ role: m.role === "thought" ? "assistant" : m.role, content: m.content })),
@@ -171,6 +173,12 @@ export default function App() {
       if (!data.ok) next.push({ id: nid("m"), role: "assistant", content: `Error: ${data.error || res.statusText}` });
       else {
         if (data.reasoning && sess.reasoning !== "off") next.push({ id: nid("m"), role: "thought", content: String(data.reasoning) });
+        if (data.toolTrace?.length)
+          next.push({
+            id: nid("m"),
+            role: "thought",
+            content: "tools:\n" + data.toolTrace.map((x: { name: string; args: string; result: string }) => `${x.name}(${x.args}) → ${String(x.result).slice(0, 400)}`).join("\n"),
+          });
         next.push({ id: nid("m"), role: "assistant", content: data.text || "(empty)" });
       }
       setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, messages: [...baseMsgs, ...next], updatedAt: Date.now() } : s)));
@@ -223,7 +231,7 @@ export default function App() {
                 )}
               </div>
               {REASONING.map((r) => (
-                <button key={r.id} type="button" onClick={() => patchActive({ reasoning: r.id })} className={cn("rounded-full px-2 py-0.5 text-[10px]", active.reasoning === r.id ? "bg-white/20" : "text-white/40")} >{r.label}</button>
+                <button key={r.id} type="button" onClick={() => patchActive({ reasoning: r.id })} className={cn("rounded-full px-2 py-0.5 text-[10px]", active.reasoning === r.id ? "bg-white/20" : "text-white/40")}>{r.label}</button>
               ))}
               <select className="rounded-full border border-white/15 bg-black px-2 py-1 text-[11px]" value={active.persona} onChange={(e) => patchActive({ persona: e.target.value })}>
                 {PERSONAS.map((p) => <option key={p.id} value={p.id} className="bg-black">{p.label}</option>)}
@@ -251,7 +259,7 @@ export default function App() {
         {tab === "labs" && (
           <div className="flex-1 overflow-y-auto p-4 text-sm text-white/60">
             <p className="mb-2 font-medium text-white/80">Labs</p>
-            <p className="text-xs">Full JB / Recon UI will return in the next update. Chat + Connectors are live in Settings.</p>
+            <p className="text-xs">Labs moved to a separate project. Chat + Connectors are here.</p>
           </div>
         )}
         {tab === "chat" && (
