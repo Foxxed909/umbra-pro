@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
         : "",
     ].filter(Boolean);
 
-    const openRouterMessages: Msg[] = [
+    const openRouterMessages: Array<Msg & { tool_calls?: unknown }> = [
       { role: "system", content: systemParts.join("\n\n") },
       ...messages
         .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system" || m.role === "tool")
@@ -143,9 +143,8 @@ export async function POST(req: NextRequest) {
         openRouterMessages.push({
           role: "assistant",
           content: msg.content || "",
-          // @ts-expect-error tool_calls
           tool_calls: toolCalls,
-        } as Msg);
+        });
 
         for (const tc of toolCalls) {
           const name = tc.function?.name || "";
@@ -166,7 +165,7 @@ export async function POST(req: NextRequest) {
             role: "tool",
             tool_call_id: tc.id,
             content: result,
-          } as Msg);
+          });
         }
         rounds++;
         continue;
