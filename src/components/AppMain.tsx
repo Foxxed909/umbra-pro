@@ -1,9 +1,14 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { MessageSquare, FlaskConical, Settings, Send, PanelLeft, Plus, Square, Trash2 } from "lucide-react";
+import {
+  MessageSquare, FlaskConical, Settings, Send, PanelLeft, Plus, Square,
+  Trash2, Copy, Check, RefreshCw, Download, PanelRight,
+} from "lucide-react";
 import { cn, nid } from "@/lib/utils";
 import { PERSONAS, personaById } from "@/lib/personas";
 import ConnectorsSettings from "@/components/ConnectorsSettings";
+import { Markdown } from "@/components/Markdown";
+import { Canvas, extractCanvasCandidates, type CanvasDoc } from "@/components/Canvas";
 
 type Tab = "chat" | "labs" | "settings";
 type ReasoningLevel = "off" | "low" | "medium" | "high";
@@ -51,6 +56,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
+  const [canvas, setCanvas] = useState<CanvasDoc | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -110,6 +117,7 @@ export default function App() {
     setActiveId(s.id);
     setTab("chat");
     setModelMenu(false);
+    setCanvas(null);
   }
   function deleteSession(id: string) {
     setSessions((prev) => {
@@ -124,8 +132,32 @@ export default function App() {
     setBusy(false);
   }
 
-  async function send() {
-    const text = input.trim();
+  async function copyMsg(id: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 1200);
+    } catch { /* */ }
+  }
+
+  function exportChat() {
+    if (!active) return;
+    const lines = active.messages
+      .filter((m) => m.role !== "thought")
+      .map((m) => `## ${m.role === "user" ? "You" : "UMBRA"}\n\n${m.content}`)
+      .join("\n\n---\n\n");
+    const md = `# ${active.title}\n\n_Model: ${active.model}_\n\n${lines}\n`;
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${active.title.replace(/[^\w\-]+/g, "_").slice(0, 40) || "chat"}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function send(overrideText?: string) {
+    const text = (overrideText ?? input).trim();
     if (!text || busy) return;
     if (!key.trim()) { setError("Add OpenRouter key in Settings"); setTab("settings"); return; }
     let sid = activeId;
@@ -143,7 +175,7 @@ export default function App() {
       sess = s;
     }
     setError(null);
-    setInput("");
+    if (!overrideText) setInput("");
     const userMsg: Msg = { id: nid("m"), role: "user", content: text };
     const baseMsgs = [...(sess.messages || []), userMsg];
     setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, messages: baseMsgs, title: s.title === "New chat" ? text.slice(0, 40) : s.title, updatedAt: Date.now() } : s)));
@@ -179,7 +211,10 @@ export default function App() {
             role: "thought",
             content: "tools:\n" + data.toolTrace.map((x: { name: string; args: string; result: string }) => `${x.name}(${x.args}) → ${String(x.result).slice(0, 400)}`).join("\n"),
           });
-        next.push({ id: nid("m"), role: "assistant", content: data.text || "(empty)" });
+        const reply = data.text || "(empty)";
+        next.push({ id: nid("m"), role: "assistant", content: reply });
+        const cands = extractCanvasCandidates(reply);
+        if (cands[0]) setCanvas(cands[0]);
       }
       setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, messages: [...baseMsgs, ...next], updatedAt: Date.now() } : s)));
     } catch (e) {
@@ -190,6 +225,16 @@ export default function App() {
       abortRef.current = null;
       inputRef.current?.focus();
     }
+  }
+
+  async function regenerate() {
+    if (!active || busy) return;
+    const msgs = [...active.messages];
+    while (msgs.length && msgs[msgs.length - 1].role !== "user") msgs.pop();
+    const lastUser = msgs[msgs.length - 1];
+    if (!lastUser || lastUser.role !== "user") return;
+    setSessions((prev) => prev.map((s) => (s.id === active.id ? { ...s, messages: msgs.slice(0, -1), updatedAt: Date.now() } : s)));
+    setTimeout(() => void send(lastUser.content), 30);
   }
 
   if (!hydrated) return <div className="flex min-h-[100dvh] items-center justify-center bg-black text-white/50">Loading…</div>;
@@ -236,6 +281,8 @@ export default function App() {
               <select className="rounded-full border border-white/15 bg-black px-2 py-1 text-[11px]" value={active.persona} onChange={(e) => patchActive({ persona: e.target.value })}>
                 {PERSONAS.map((p) => <option key={p.id} value={p.id} className="bg-black">{p.label}</option>)}
               </select>
+              <button type="button" onClick={exportChat} className="rounded p-1.5 text-white/40 hover:bg-white/10 hover:text-white" title="Export chat"><Download className="size-3.5" /></button>
+              <button type="button" onClick={() => setCanvas((c) => c ? null : { id: "manual", title: "Canvas", content: active.messages.filter(m => m.role === "assistant").slice(-1)[0]?.content || "_Empty_" })} className="rounded p-1.5 text-white/40 hover:bg-white/10 hover:text-white" title="Toggle canvas"><PanelRight className="size-3.5" /></button>
             </>
           )}
         </header>
@@ -259,32 +306,50 @@ export default function App() {
         {tab === "labs" && (
           <div className="flex-1 overflow-y-auto p-4 text-sm text-white/60">
             <p className="mb-2 font-medium text-white/80">Labs</p>
-            <p className="text-xs">Labs moved to a separate project. Chat + Connectors are here.</p>
+            <p className="text-xs">JB / recon / orchestrate live in a separate repo: <a className="underline" href="https://github.com/Foxxed909/umbra-labs" target="_blank" rel="noreferrer">umbra-labs</a></p>
           </div>
         )}
         {tab === "chat" && (
-          <>
-            <div className="flex-1 space-y-3 overflow-y-auto px-3 py-4">
-              {!active?.messages?.length && <p className="text-center text-xs text-white/40">Start a message…</p>}
-              {active?.messages?.map((m) => (
-                <div key={m.id} className={cn("max-w-[92%] rounded-2xl px-3 py-2 text-sm", m.role === "user" ? "ml-auto bg-white text-black" : m.role === "thought" ? "border border-white/10 bg-white/5 text-white/50 text-xs" : "bg-white/10 text-white")}>
-                  {m.content}
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex-1 space-y-3 overflow-y-auto px-3 py-4">
+                {!active?.messages?.length && <p className="text-center text-xs text-white/40">Start a message…</p>}
+                {active?.messages?.map((m) => (
+                  <div key={m.id} className={cn("group relative max-w-[92%] rounded-2xl px-3 py-2", m.role === "user" ? "ml-auto bg-white text-black" : m.role === "thought" ? "border border-white/10 bg-white/5 text-white/45 text-[11px] font-mono whitespace-pre-wrap" : "bg-white/10 text-white")}>
+                    {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
+                    {m.role === "assistant" && (
+                      <div className="mt-1 flex gap-1 opacity-70 group-hover:opacity-100">
+                        <button type="button" className="rounded p-1 hover:bg-white/10" title="Copy" onClick={() => void copyMsg(m.id, m.content)}>
+                          {copiedId === m.id ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
+                        </button>
+                        <button type="button" className="rounded p-1 hover:bg-white/10" title="Open in canvas" onClick={() => setCanvas({ id: m.id, title: "Response", content: m.content })}>
+                          <PanelRight className="size-3" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {busy && <div className="text-xs text-white/40">Thinking…</div>}
+                <div ref={bottomRef} />
+              </div>
+              <div className="border-t border-white/10 p-2">
+                <div className="mb-1 flex gap-1">
+                  <button type="button" disabled={busy || !active?.messages?.length} onClick={() => void regenerate()} className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/50 hover:bg-white/5 disabled:opacity-30" title="Regenerate last">
+                    <RefreshCw className="mr-1 inline size-3" />Regenerate
+                  </button>
                 </div>
-              ))}
-              {busy && <div className="text-xs text-white/40">Thinking…</div>}
-              <div ref={bottomRef} />
-            </div>
-            <div className="border-t border-white/10 p-2">
-              <div className="flex items-center gap-2">
-                <input ref={inputRef} className="flex-1 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-sm outline-none focus:border-white/30" placeholder="Message…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
-                {busy ? (
-                  <button type="button" onClick={stop} className="rounded-full bg-white/10 p-2.5"><Square className="size-4" /></button>
-                ) : (
-                  <button type="button" onClick={() => void send()} className="rounded-full bg-white p-2.5 text-black"><Send className="size-4" /></button>
-                )}
+                <div className="flex items-center gap-2">
+                  <input ref={inputRef} className="flex-1 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-sm outline-none focus:border-white/30" placeholder="Message…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+                  {busy ? (
+                    <button type="button" onClick={stop} className="rounded-full bg-white/10 p-2.5"><Square className="size-4" /></button>
+                  ) : (
+                    <button type="button" onClick={() => void send()} className="rounded-full bg-white p-2.5 text-black"><Send className="size-4" /></button>
+                  )}
+                </div>
               </div>
             </div>
-          </>
+            <Canvas doc={canvas} onClose={() => setCanvas(null)} />
+          </div>
         )}
       </main>
     </div>
