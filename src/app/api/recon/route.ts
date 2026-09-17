@@ -1,26 +1,24 @@
-import { NextRequest, NextResponse } from "next/server";
-import { runRecon } from "@/lib/recon";
+import { NextResponse } from "next/server";
+import { collectRecon, instrumentFindings, packToPrompt } from "@/lib/recon";
+import { DEPTHS } from "@/lib/types";
 
-export async function POST(req: NextRequest) {
+export const maxDuration = 60;
+
+export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { target, depth, authorized } = body as {
-      target?: string;
-      depth?: string;
-      authorized?: boolean;
-    };
-    if (!authorized) {
-      return NextResponse.json({ ok: false, error: "Authorization required" }, { status: 403 });
+    if (!body.authorized) {
+      return NextResponse.json({ ok: false, error: "Authorization was not confirmed." });
     }
-    if (!target || typeof target !== "string") {
-      return NextResponse.json({ ok: false, error: "Missing target" }, { status: 400 });
-    }
-    const result = await runRecon({
-      target,
-      depth: (depth as "pulse") || "pulse",
+    const depth = DEPTHS.find((d) => d.id === body.depth)?.id ?? "pulse";
+    const pack = await collectRecon(String(body.target || ""), depth);
+    const findings = instrumentFindings(pack);
+    const prompt = packToPrompt(pack);
+    return NextResponse.json({ ok: true, pack, findings, prompt });
+  } catch (err) {
+    return NextResponse.json({
+      ok: false,
+      error: err instanceof Error ? err.message : "Recon failed.",
     });
-    return NextResponse.json(result);
-  } catch (e) {
-    return NextResponse.json({ ok: false, error: String(e) }, { status: 500 });
   }
 }
