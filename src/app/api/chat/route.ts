@@ -1,24 +1,74 @@
 import { NextRequest, NextResponse } from "next/server";
 
-type Msg = { role: string; content: string };
+type Msg = { role: string; content: string; tool_call_id?: string; name?: string };
+
+async function webSearch(query: string): Promise<string> {
+  try {
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+    const res = await fetch(url, { headers: { "User-Agent": "UMBRA-Pro/1.0" } });
+    const data = await res.json();
+    const bits: string[] = [];
+    if (data.AbstractText) bits.push(data.AbstractText);
+    if (data.Answer) bits.push(String(data.Answer));
+    const topics = (data.RelatedTopics || []).slice(0, 5);
+    for (const t of topics) {
+      if (typeof t.Text === "string") bits.push(t.Text);
+      else if (t.Topics) {
+        for (const s of t.Topics.slice(0, 2)) if (s.Text) bits.push(s.Text);
+      }
+    }
+    if (!bits.length) {
+      const lite = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+        headers: { "User-Agent": "UMBRA-Pro/1.0" },
+      });
+      const html = await lite.text();
+      const matches = [...html.matchAll(/class="result__a"[^>]*>([^<]+)/g)].slice(0, 6);
+      for (const m of matches) bits.push(m[1].trim());
+    }
+    return bits.length ? bits.join("\n• ") : `No results for: ${query}`;
+  } catch (e) {
+    return `Search failed: ${String(e)}`;
+  }
+}
+
+const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "web_search",
+      description: "Search the live web for current information, facts, news, or documentation.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+];
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
-      provider,
+      provider = "openrouter",
       model,
       apiKey,
       messages,
       reasoningLevel = "medium",
       projectInstructions,
+      enableTools = true,
+      max_tokens = 4096,
     } = body as {
-      provider: string;
+      provider?: string;
       model: string;
       apiKey: string;
       messages: Msg[];
       reasoningLevel?: string;
       projectInstructions?: string;
+      enableTools?: boolean;
+      max_tokens?: number;
     };
 
     if (!apiKey?.trim()) {
@@ -29,24 +79,42 @@ export async function POST(req: NextRequest) {
     }
 
     const systemParts = [
-      "You are UMBRA, a precise, capable assistant in a glassy steel workspace.",
+      "You are UMBRA, a precise, capable assistant.",
+      enableTools
+        ? "You have a web_search tool. Use it when the user asks for current events, live data, or facts you are unsure about. Call the tool instead of claiming you cannot search."
+        : "You do not have live web access in this session.",
       projectInstructions ? `Project instructions:\n${projectInstructions}` : "",
       reasoningLevel !== "off"
         ? `When helpful, think step-by-step. Reasoning level: ${reasoningLevel}.`
         : "",
     ].filter(Boolean);
 
-    const sys = systemParts.join("\n\n");
-    const openRouterMessages = [
-      { role: "system", content: sys },
+    const openRouterMessages: Msg[] = [
+      { role: "system", content: systemParts.join("\n\n") },
       ...messages
-        .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
-        .map((m) => ({ role: m.role, content: m.content })),
+        .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system" || m.role === "tool")
+        .map((m) => ({ ...m })),
     ];
 
-    if (provider === "openrouter" || provider === "openai") {
-      const base =
-        provider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1";
+    const base =
+      provider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1";
+
+    const toolTrace: { name: string; args: string; result: string }[] = [];
+    let rounds = 0;
+    const maxRounds = enableTools ? 3 : 0;
+
+    while (true) {
+      const payload: Record<string, unknown> = {
+        model,
+        messages: openRouterMessages,
+        temperature: 0.6,
+        max_tokens,
+      };
+      if (enableTools && rounds < maxRounds) {
+        payload.tools = TOOLS;
+        payload.tool_choice = "auto";
+      }
+
       const res = await fetch(`${base}/chat/completions`, {
         method: "POST",
         headers: {
@@ -56,12 +124,7 @@ export async function POST(req: NextRequest) {
             ? { "HTTP-Referer": "https://umbra.app", "X-Title": "UMBRA Pro" }
             : {}),
         },
-        body: JSON.stringify({
-          model,
-          messages: openRouterMessages,
-          temperature: 0.6,
-          max_tokens: 4096,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -70,105 +133,53 @@ export async function POST(req: NextRequest) {
           { status: 502 },
         );
       }
-      const text = data.choices?.[0]?.message?.content ?? "";
-      const reasoning =
-        data.choices?.[0]?.message?.reasoning ||
-        data.choices?.[0]?.message?.reasoning_content ||
-        undefined;
-      return NextResponse.json({ ok: true, text, reasoning });
-    }
 
-    if (provider === "anthropic") {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 4096,
-          system: sys,
-          messages: openRouterMessages
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .map((m) => ({ role: m.role, content: m.content })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        return NextResponse.json(
-          { ok: false, error: data?.error?.message || res.statusText },
-          { status: 502 },
-        );
+      const choice = data.choices?.[0];
+      const msg = choice?.message;
+      const reasoning = msg?.reasoning || msg?.reasoning_content || undefined;
+      const toolCalls = msg?.tool_calls;
+
+      if (Array.isArray(toolCalls) && toolCalls.length > 0 && rounds < maxRounds) {
+        openRouterMessages.push({
+          role: "assistant",
+          content: msg.content || "",
+          // @ts-expect-error tool_calls
+          tool_calls: toolCalls,
+        } as Msg);
+
+        for (const tc of toolCalls) {
+          const name = tc.function?.name || "";
+          let args: { query?: string } = {};
+          try {
+            args = JSON.parse(tc.function?.arguments || "{}");
+          } catch {
+            args = {};
+          }
+          let result = "";
+          if (name === "web_search" && args.query) {
+            result = await webSearch(args.query);
+          } else {
+            result = `Unknown tool: ${name}`;
+          }
+          toolTrace.push({ name, args: JSON.stringify(args), result: result.slice(0, 2000) });
+          openRouterMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: result,
+          } as Msg);
+        }
+        rounds++;
+        continue;
       }
-      const text = Array.isArray(data.content)
-        ? data.content.map((c: { text?: string }) => c.text || "").join("")
-        : "";
-      return NextResponse.json({ ok: true, text });
-    }
 
-    if (provider === "gemini") {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const contents = openRouterMessages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }],
-        }));
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: sys }] },
-          contents,
-        }),
+      const text = msg?.content ?? "";
+      return NextResponse.json({
+        ok: true,
+        text,
+        reasoning,
+        toolTrace: toolTrace.length ? toolTrace : undefined,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        return NextResponse.json(
-          { ok: false, error: data?.error?.message || res.statusText },
-          { status: 502 },
-        );
-      }
-      const text =
-        data.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("") ||
-        "";
-      return NextResponse.json({ ok: true, text });
     }
-
-    if (provider === "xai") {
-      const res = await fetch("https://api.x.ai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages: openRouterMessages,
-          temperature: 0.6,
-          max_tokens: 4096,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        return NextResponse.json(
-          { ok: false, error: data?.error?.message || res.statusText },
-          { status: 502 },
-        );
-      }
-      const text = data.choices?.[0]?.message?.content ?? "";
-      return NextResponse.json({ ok: true, text });
-    }
-
-    return NextResponse.json(
-      {
-        ok: false,
-        error: `Provider ${provider} not wired yet — use OpenRouter, OpenAI, Anthropic, Gemini, or xAI.`,
-      },
-      { status: 400 },
-    );
   } catch (e) {
     return NextResponse.json({ ok: false, error: String(e) }, { status: 500 });
   }
