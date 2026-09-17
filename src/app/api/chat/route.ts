@@ -58,6 +58,7 @@ export async function POST(req: NextRequest) {
       messages,
       reasoningLevel = "medium",
       projectInstructions,
+      personaSystem,
       enableTools = true,
       max_tokens = 4096,
     } = body as {
@@ -67,6 +68,7 @@ export async function POST(req: NextRequest) {
       messages: Msg[];
       reasoningLevel?: string;
       projectInstructions?: string;
+      personaSystem?: string;
       enableTools?: boolean;
       max_tokens?: number;
     };
@@ -79,7 +81,9 @@ export async function POST(req: NextRequest) {
     }
 
     const systemParts = [
-      "You are UMBRA, a precise, capable assistant.",
+      personaSystem && String(personaSystem).trim()
+        ? String(personaSystem).trim()
+        : "You are UMBRA, a precise, capable assistant.",
       enableTools
         ? "You have a web_search tool. Use it when the user asks for current events, live data, or facts you are unsure about. Call the tool instead of claiming you cannot search."
         : "You do not have live web access in this session.",
