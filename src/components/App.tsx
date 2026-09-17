@@ -7,14 +7,13 @@ type Tab = "chat" | "labs" | "settings";
 type ReasoningLevel = "off" | "low" | "medium" | "high";
 interface Msg { id: string; role: "user" | "assistant" | "thought"; content: string; }
 interface Session { id: string; title: string; model: string; reasoning: ReasoningLevel; contextTokens: number; messages: Msg[]; createdAt: number; updatedAt: number; }
+interface JbRow { probeId: string; technique: string; score: string; response: string; }
 
 const MODELS: { id: string; label: string; free?: boolean; ctx: number }[] = [
   { id: "stealth/union-alpha", label: "Union Alpha", free: true, ctx: 262144 },
   { id: "inclusionai/ling-3.0-flash-vl:free", label: "Ling 3.0 Flash VL", free: true, ctx: 262144 },
-  { id: "inclusionai/ling-3.0-flash-sante:free", label: "Ling 3.0 Flash Sante", free: true, ctx: 262144 },
   { id: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning", free: true, ctx: 1000000 },
   { id: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra", free: true, ctx: 1000000 },
-  { id: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron 3 Super", free: true, ctx: 262144 },
   { id: "z-ai/glm-5.2:free", label: "GLM 5.2", free: true, ctx: 131072 },
   { id: "nex-agi/nex-n2.5-pro:free", label: "Nex N2.5 Pro", free: true, ctx: 262144 },
   { id: "nex-agi/nex-n2.5-mini:free", label: "Nex N2.5 Mini", free: true, ctx: 262144 },
@@ -22,12 +21,8 @@ const MODELS: { id: string; label: string; free?: boolean; ctx: number }[] = [
   { id: "qwen/qwen3-235b-a22b:free", label: "Qwen3 235B", free: true, ctx: 262144 },
   { id: "google/gemma-4-31b-it:free", label: "Gemma 4 31B", free: true, ctx: 262144 },
   { id: "thinkingmachines/inkling:free", label: "Inkling", free: true, ctx: 1000000 },
-  { id: "thinkingmachines/inkling-small:free", label: "Inkling Small", free: true, ctx: 1000000 },
-  { id: "poolside/laguna-s-2.1:free", label: "Laguna S 2.1", free: true, ctx: 262144 },
   { id: "openrouter/free", label: "OR free router", free: true, ctx: 200000 },
   { id: "openai/gpt-4o-mini", label: "GPT-4o mini", ctx: 128000 },
-  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", ctx: 200000 },
-  { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", ctx: 1000000 },
   { id: "x-ai/grok-4.5", label: "Grok 4.5", ctx: 256000 },
 ];
 const REASONING: { id: ReasoningLevel; label: string }[] = [
@@ -35,10 +30,8 @@ const REASONING: { id: ReasoningLevel; label: string }[] = [
 ];
 const DEPTHS = ["pulse","surface","probe","depth","shadow","abyss","rift","core"] as const;
 const LS = { key: "umbra.pro.openrouter", defaults: "umbra.pro.defaults", sessions: "umbra.pro.sessions", active: "umbra.pro.activeSession", bg: "umbra.pro.bg", bgOpacity: "umbra.pro.bgOpacity", sidebar: "umbra.pro.sidebar" };
-
 function meta(id: string) { return MODELS.find((m) => m.id === id) || MODELS[0]; }
 function fmtCtx(n: number) { return n >= 1e6 ? `${(n/1e6).toFixed(n%1e6?1:0)}M` : n >= 1000 ? `${Math.round(n/1000)}K` : String(n); }
-
 function Logo({ active }: { active: boolean }) {
   return (
     <div className="relative flex size-7 items-center justify-center rounded-full border border-white/15 bg-black">
@@ -68,6 +61,10 @@ export default function App() {
   const [labDepth, setLabDepth] = useState("surface");
   const [labBusy, setLabBusy] = useState(false);
   const [labLog, setLabLog] = useState("");
+  const [labMode, setLabMode] = useState<"recon" | "jb">("recon");
+  const [jbModel, setJbModel] = useState("stealth/union-alpha");
+  const [jbResults, setJbResults] = useState<JbRow[]>([]);
+  const [jbScore, setJbScore] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -104,7 +101,7 @@ export default function App() {
       if (bg) localStorage.setItem(LS.bg, bg); else localStorage.removeItem(LS.bg);
       localStorage.setItem(LS.sessions, JSON.stringify(sessions));
       if (activeId) localStorage.setItem(LS.active, activeId);
-    } catch { /* quota */ }
+    } catch { /* */ }
   }, [key, defaultModel, defaultReasoning, defaultCtx, bg, bgOpacity, sessions, activeId, sidebarOpen, hydrated]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [active?.messages, busy]);
@@ -113,24 +110,14 @@ export default function App() {
     if (!activeId) return;
     setSessions((prev) => prev.map((s) => (s.id === activeId ? { ...s, ...patch, updatedAt: Date.now() } : s)));
   }
-
   function newSession() {
     const m = meta(defaultModel);
     const s: Session = { id: nid("s"), title: "New chat", model: defaultModel, reasoning: defaultReasoning, contextTokens: Math.min(defaultCtx, m.ctx), messages: [], createdAt: Date.now(), updatedAt: Date.now() };
-    setSessions((prev) => [s, ...prev]);
-    setActiveId(s.id);
-    setTab("chat");
-    setModelMenu(false);
+    setSessions((prev) => [s, ...prev]); setActiveId(s.id); setTab("chat"); setModelMenu(false);
   }
-
   function deleteSession(id: string) {
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      if (activeId === id) setActiveId(next[0]?.id || null);
-      return next;
-    });
+    setSessions((prev) => { const next = prev.filter((s) => s.id !== id); if (activeId === id) setActiveId(next[0]?.id || null); return next; });
   }
-
   async function titleSession(sessionId: string, firstUser: string, apiKey: string) {
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "openrouter", model: "z-ai/glm-5.2:free", apiKey, reasoningLevel: "off", messages: [{ role: "user", content: `3-6 word title only, no quotes:\n${firstUser.slice(0, 400)}` }] }) });
@@ -141,15 +128,13 @@ export default function App() {
       }
     } catch { /* */ }
   }
-
   function stop() { abortRef.current?.abort(); abortRef.current = null; setBusy(false); }
 
   async function send() {
     const text = input.trim();
     if (!text || busy) return;
     if (!key.trim()) { setError("Add OpenRouter key in Settings"); setTab("settings"); return; }
-    let sid = activeId;
-    let sess = active;
+    let sid = activeId; let sess = active;
     if (!sess) {
       const m = meta(defaultModel);
       const s: Session = { id: nid("s"), title: "New chat", model: defaultModel, reasoning: defaultReasoning, contextTokens: Math.min(defaultCtx, m.ctx), messages: [], createdAt: Date.now(), updatedAt: Date.now() };
@@ -177,6 +162,23 @@ export default function App() {
       const msg = (e as Error).name === "AbortError" ? "⏹ Stopped" : `Network: ${String(e)}`;
       setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, messages: [...baseMsgs, { id: nid("m"), role: "assistant", content: msg }], updatedAt: Date.now() } : s)));
     } finally { setBusy(false); abortRef.current = null; inputRef.current?.focus(); }
+  }
+
+  async function runJB() {
+    if (!key.trim()) { setError("Add OpenRouter key in Settings"); setTab("settings"); return; }
+    setLabBusy(true); setJbResults([]); setJbScore(null); setLabLog("Running JB probes…\n");
+    try {
+      const res = await fetch("/api/lab", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ apiKey: key, model: jbModel }) });
+      const data = await res.json();
+      if (!data.ok) setLabLog("Error: " + (data.error || "failed"));
+      else {
+        setJbResults(data.results || []);
+        setJbScore(typeof data.score === "number" ? data.score : null);
+        const c = data.counts || {};
+        setLabLog(`Model: ${data.model || jbModel}\nScore: ${data.score}/100\nRefused: ${c.refused} · Partial: ${c.partial} · Jailbroken: ${c.jailbroken} · Error: ${c.error}\n`);
+      }
+    } catch (e) { setLabLog(String(e)); }
+    finally { setLabBusy(false); }
   }
 
   async function runLabs() {
@@ -268,7 +270,7 @@ export default function App() {
             <h1 className="mb-3 text-sm font-medium">Defaults & keys</h1>
             <label className="mb-1 block text-[10px] uppercase text-white/40">OpenRouter key</label>
             <input type="password" className="mb-3 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2.5 font-mono text-xs" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-or-v1-…" />
-            <label className="mb-1 block text-[10px] uppercase text-white/40">Default model (new chats)</label>
+            <label className="mb-1 block text-[10px] uppercase text-white/40">Default model</label>
             <select className="mb-3 w-full rounded-lg border border-white/10 bg-white/5 px-2 py-2.5 text-xs" value={defaultModel} onChange={(e) => { setDefaultModel(e.target.value); setDefaultCtx((c) => Math.min(c, meta(e.target.value).ctx)); }}>
               {MODELS.map((m) => <option key={m.id} value={m.id} className="bg-black">{m.label} ({fmtCtx(m.ctx)})</option>)}
             </select>
@@ -281,31 +283,62 @@ export default function App() {
             </div>
             {active && (
               <div className="mb-3 rounded-lg border border-white/10 p-2">
-                <div className="text-[10px] uppercase text-white/40">This session context · {fmtCtx(active.contextTokens)} / {fmtCtx(maxCtx)}</div>
+                <div className="text-[10px] uppercase text-white/40">Session context · {fmtCtx(active.contextTokens)} / {fmtCtx(maxCtx)}</div>
                 <input type="range" min={2048} max={maxCtx} step={1024} value={Math.min(active.contextTokens, maxCtx)} onChange={(e) => patchActive({ contextTokens: Number(e.target.value) })} className="mt-1 w-full accent-white" />
               </div>
             )}
             <label className="mb-1 block text-[10px] uppercase text-white/40">Background</label>
             <div className="flex gap-2">
               <button type="button" onClick={() => fileRef.current?.click()} className="flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs"><ImageIcon className="size-3.5" />Upload</button>
-              {bg && <button type="button" onClick={() => setBg(null)} className="rounded-lg border border-white/10 px-3 py-2 text-xs"><X className="inline size-3.5" />Clear</button>}
+              {bg && <button type="button" onClick={() => setBg(null)} className="rounded-lg border border-white/10 px-3 py-2 text-xs">Clear</button>}
             </div>
             <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => onBgFile(e.target.files?.[0] || null)} />
             {bg && <input type="range" min={0.05} max={0.7} step={0.05} value={bgOpacity} onChange={(e) => setBgOpacity(Number(e.target.value))} className="mt-2 w-full accent-white" />}
-            <p className="mt-6 text-[10px] text-white/30">Fire HD ~800×1280 · sessions local · GLM-5.2 titles chats</p>
           </div>
         )}
         {tab === "labs" && (
           <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="space-y-2 border-b border-white/10 p-3">
-              <div className="flex items-center gap-2 text-xs text-white/70"><Target className="size-4" />Authorized recon</div>
-              <input className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2.5 text-xs" value={labTarget} onChange={(e) => setLabTarget(e.target.value)} placeholder="https://target.example" />
-              <div className="flex flex-wrap gap-1">
-                {DEPTHS.map((d) => <button key={d} type="button" onClick={() => setLabDepth(d)} className={cn("rounded-md border px-2 py-1 text-[10px]", labDepth === d ? "border-white/30 bg-white/15" : "border-white/10 text-white/40")}>{d}</button>)}
-              </div>
-              <button type="button" disabled={labBusy} onClick={() => void runLabs()} className="w-full rounded-lg bg-white py-2.5 text-xs font-medium text-black disabled:opacity-40">{labBusy ? "Running…" : "Run recon"}</button>
+            <div className="flex gap-1 border-b border-white/10 p-2">
+              <button type="button" onClick={() => setLabMode("recon")} className={cn("flex-1 rounded-lg py-2 text-xs", labMode === "recon" ? "bg-white/15" : "text-white/40")}>Recon</button>
+              <button type="button" onClick={() => setLabMode("jb")} className={cn("flex-1 rounded-lg py-2 text-xs", labMode === "jb" ? "bg-white/15" : "text-white/40")}>AI JB</button>
             </div>
-            <pre className="flex-1 overflow-auto whitespace-pre-wrap p-3 font-mono text-[11px] text-white/70">{labLog || "Only scan targets you are authorized to test."}</pre>
+            {labMode === "recon" && (
+              <>
+                <div className="space-y-2 border-b border-white/10 p-3">
+                  <div className="flex items-center gap-2 text-xs text-white/70"><Target className="size-4" />Authorized recon</div>
+                  <input className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2.5 text-xs" value={labTarget} onChange={(e) => setLabTarget(e.target.value)} placeholder="https://target.example" />
+                  <div className="flex flex-wrap gap-1">
+                    {DEPTHS.map((d) => <button key={d} type="button" onClick={() => setLabDepth(d)} className={cn("rounded-md border px-2 py-1 text-[10px]", labDepth === d ? "border-white/30 bg-white/15" : "border-white/10 text-white/40")}>{d}</button>)}
+                  </div>
+                  <button type="button" disabled={labBusy} onClick={() => void runLabs()} className="w-full rounded-lg bg-white py-2.5 text-xs font-medium text-black disabled:opacity-40">{labBusy ? "Running…" : "Run recon"}</button>
+                </div>
+                <pre className="flex-1 overflow-auto whitespace-pre-wrap p-3 font-mono text-[11px] text-white/70">{labLog || "Only scan targets you are authorized to test."}</pre>
+              </>
+            )}
+            {labMode === "jb" && (
+              <>
+                <div className="space-y-2 border-b border-white/10 p-3">
+                  <div className="text-xs text-white/70">Model red-team · 12 probes · heuristic score</div>
+                  <select className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-2.5 text-xs" value={jbModel} onChange={(e) => setJbModel(e.target.value)}>
+                    {MODELS.map((m) => <option key={m.id} value={m.id} className="bg-black">{m.label}</option>)}
+                  </select>
+                  <button type="button" disabled={labBusy} onClick={() => void runJB()} className="w-full rounded-lg bg-white py-2.5 text-xs font-medium text-black disabled:opacity-40">{labBusy ? "Probing…" : "Run full JB suite"}</button>
+                  {jbScore !== null && <div className="text-center text-sm text-white/80">Suite score: <span className="font-mono">{jbScore}</span>/100</div>}
+                </div>
+                <div className="flex-1 space-y-2 overflow-y-auto p-2">
+                  {jbResults.length === 0 && !labBusy && <p className="p-3 text-[11px] text-white/40">Leetspeak, encoding, roleplay, hierarchy, canary, confuse-stack, schema trap, etc. Uses your OpenRouter key.</p>}
+                  {jbResults.map((r) => (
+                    <div key={r.probeId} className="rounded-lg border border-white/10 bg-white/5 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-white/80">{r.technique}</span>
+                        <span className={cn("rounded px-1.5 py-0.5 text-[10px] uppercase", r.score === "refused" ? "bg-emerald-900/50 text-emerald-300" : r.score === "jailbroken" ? "bg-red-900/50 text-red-300" : r.score === "error" ? "bg-white/10 text-white/40" : "bg-amber-900/40 text-amber-200")}>{r.score}</span>
+                      </div>
+                      <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-white/50">{(r.response || "").slice(0, 500)}</pre>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
         {tab === "chat" && (
